@@ -47,7 +47,7 @@ dump.rdb
 *.pem
 
 # Python
-__pycache__/
+/__pycache__
 *pyc*
 venv/
 .venv/

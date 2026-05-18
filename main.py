@@ -34,7 +34,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pathlib import Path
 import logging
 import os
-
+import resend
 from models import Contact, ContactCreate
 from email_service import email_service
 

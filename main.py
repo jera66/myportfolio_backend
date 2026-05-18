@@ -1,140 +1,207 @@
+"""
+Portfolio Backend Server - FastAPI Application
+
+Main server module for Jerathel's portfolio website.
+Handles contact form submissions, email notifications, and admin endpoints.
+
+ENDPOINTS:
+    GET  /api/               - Health check (API status)
+    GET  /api/health         - System health with email config status
+    POST /api/contact        - Submit contact form
+    GET  /api/download/resume - Download résumé PDF
+
+ENVIRONMENT VARIABLES (backend/.env):
+    MONGO_URL: MongoDB connection string
+    DB_NAME: Database name (default: test_database)
+    RESEND_API_KEY: Resend email API key
+    SENDER_EMAIL: Email sender address
+    ADMIN_EMAIL: Notification recipient
+
+RUNNING:
+    Managed by Supervisor on port 8001
+    Restart: sudo supervisorctl restart backend
+"""
+
+# ============================================================
+# IMPORTS
+# ============================================================
+
 from fastapi import FastAPI, APIRouter, HTTPException
-from fastapi.responses import JSONResponse
-from dotenv import load_dotenv
+from fastapi.responses import JSONResponse, FileResponse
 from starlette.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
 from motor.motor_asyncio import AsyncIOMotorClient
-import os
-import logging
 from pathlib import Path
+import logging
+import os
+
 from models import Contact, ContactCreate
 from email_service import email_service
 
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
 ROOT_DIR = Path(__file__).parent
-load_dotenv(ROOT_DIR / '.env')
+load_dotenv(ROOT_DIR / ".env")
 
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
+# Résumé file configuration
+RESUME_DIR = ROOT_DIR / "resume"
+RESUME_FILENAME = "Jerathel-Czerny-Software Engineer.pdf"
+RESUME_PATH = RESUME_DIR / RESUME_FILENAME
+
+
+# ============================================================
+# DATABASE CONNECTION
+# ============================================================
+
+mongo_url = os.environ["MONGO_URL"]
 client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
-
-# Create the main app without a prefix
-app = FastAPI(title="Jerathel Portfolio API")
-@app.get("/")
-def read_root():
-    return {
-        "status": "ok",
-        "message": "Backend is running"
-    }
+db = client[os.environ["DB_NAME"]]
 
 
-# Create a router with the /api prefix
+# ============================================================
+# APP INITIALIZATION
+# ============================================================
+
+app = FastAPI(
+    title="Jerathel Portfolio API",
+    description="Backend API for portfolio contact form and admin functions",
+    version="1.0.0",
+)
+
 api_router = APIRouter(prefix="/api")
 
-# Test route
+
+# ============================================================
+# ROUTES — HEALTH CHECK
+# ============================================================
+
 @api_router.get("/")
 async def root():
     return {"message": "Portfolio API is running"}
 
-# Contact form submission endpoint
+
+@api_router.get("/health")
+async def health_check():
+    return {
+        "status": "healthy",
+        "email_configured": email_service.enabled,
+    }
+
+
+# ============================================================
+# ROUTES — CONTACT FORM
+# ============================================================
+
 @api_router.post("/contact", response_model=dict)
 async def submit_contact(contact_data: ContactCreate):
     """
-    Handle contact form submissions
-    - Validates input data
-    - Stores in MongoDB
-    - Sends email notification
+    Handle contact form submissions:
+    - Validate input
+    - Save to MongoDB
+    - Send email notification
     """
     try:
-        # Create contact object
         contact = Contact(
             name=contact_data.name,
             email=contact_data.email,
             subject=contact_data.subject,
-            message=contact_data.message
+            message=contact_data.message,
         )
-        
-        # Store in MongoDB
-        result = await db.contacts.insert_one(contact.dict())
-        
-        # Send email notification (async, don't block response)
+
+        await db.contacts.insert_one(contact.dict())
+
         try:
             await email_service.send_contact_notification(
                 name=contact.name,
                 email=contact.email,
                 subject=contact.subject,
-                message=contact.message
+                message=contact.message,
             )
         except Exception as email_error:
-            # Log but don't fail the request if email fails
-            logging.error(f"Email notification failed: {str(email_error)}")
-        
+            logging.error(f"Email notification failed: {email_error}")
+
         return {
             "success": True,
             "message": "Message received successfully. I'll get back to you soon!",
-            "id": contact.id
+            "id": contact.id,
         }
-    
+
     except Exception as e:
-        logging.error(f"Contact submission error: {str(e)}")
+        logging.error(f"Contact submission error: {e}")
         raise HTTPException(
             status_code=500,
-            detail="Failed to submit contact form. Please try again or email me directly."
+            detail="Failed to submit contact form. Please try again or email me directly.",
         )
 
-# Get all contacts (admin endpoint - could add auth later)
-@api_router.get("/contacts")
-async def get_contacts():
+
+# ============================================================
+# ROUTES — RÉSUMÉ DOWNLOAD
+# ============================================================
+
+@api_router.get("/download/resume")
+async def download_resume():
     """
-    Retrieve all contact submissions (admin use)
+    Serve the résumé PDF as a downloadable file.
     """
     try:
-        contacts_cursor = db.contacts.find().sort("created_at", -1).limit(1000)
-        contacts = []
-        
-        async for contact in contacts_cursor:
-            # Convert MongoDB document to JSON-serializable format
-            contact_dict = {
-                "id": contact.get("id"),
-                "name": contact.get("name"),
-                "email": contact.get("email"),
-                "subject": contact.get("subject"),
-                "message": contact.get("message"),
-                "created_at": contact.get("created_at").isoformat() if contact.get("created_at") else None,
-                "read": contact.get("read", False)
-            }
-            contacts.append(contact_dict)
-        
-        return {"contacts": contacts, "count": len(contacts)}
+        if not RESUME_PATH.exists():
+            logging.error(f"Resume file not found at: {RESUME_PATH}")
+            raise HTTPException(status_code=404, detail="Resume file not found")
+
+        return FileResponse(
+            path=RESUME_PATH,
+            media_type="application/pdf",
+            filename=RESUME_FILENAME,
+            headers={
+                "Cache-Control": "no-store",
+                "Content-Disposition": f'attachment; filename="{RESUME_FILENAME}"',
+            },
+        )
+
+    except HTTPException:
+        raise
     except Exception as e:
-        logging.error(f"Failed to fetch contacts: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to fetch contacts")
+        logging.error(f"Resume download failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to download resume")
 
-# Health check endpoint
-@api_router.get("/health")
-async def health_check():
-    return {
-        "status": "healthy",
-        "email_configured": email_service.enabled
-    }
 
-# Include the router in the main app
+# ============================================================
+# ROUTER REGISTRATION
+# ============================================================
+
 app.include_router(api_router)
+
+
+# ============================================================
+# MIDDLEWARE — CORS
+# ============================================================
 
 app.add_middleware(
     CORSMiddleware,
+    allow_origins=["*"],      # Allow all origins (adjust for production)
     allow_credentials=True,
-    allow_origins=["http://localhost:5173",  # Vite
-        "http://127.0.0.1:5173",],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Configure logging
+
+# ============================================================
+# LOGGING CONFIGURATION
+# ============================================================
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# LIFECYCLE EVENTS
+# ============================================================
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
